@@ -10,6 +10,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 find_package(fmt REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(ChoUtil REQUIRED PATHS "$ENV{HOME}/Repos/Ravel/ChoUtils/install")
+# find_package(nanoflann REQUIRED)
+
 
 set(SRC_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
@@ -25,7 +27,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES} ${HDR_FILES})
 target_include_directories(${PROJECT_NAME} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
     ${ChoUtil_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS}
     )
-target_link_libraries(${PROJECT_NAME} fmt ChoUtil::core ${OpenCV_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} fmt ChoUtil::core ChoUtil::util ${OpenCV_LIBRARIES})# nanoflann::nanoflann)
 
 # Copy scripts.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
