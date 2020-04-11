@@ -224,7 +224,7 @@ struct KdTree {
       q->emplace(d, index);
     }
 #else
-    q->Add({d, i});
+    q->Add({d, index});
 #endif
   }
 
@@ -252,7 +252,7 @@ struct KdTree {
         q->emplace(d, index);
       }
 #else
-      q->Add({d, i});
+      q->Add({d, index});
 #endif
     }
   }
