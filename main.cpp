@@ -135,7 +135,7 @@ struct TopKV2 {
     }
   }
 
-  inline int size() const { return values.size(); }
+  inline const auto size() const { return values.size(); }
   inline const std::pair<float, int>& top() const { return values.front(); }
 };
 
@@ -250,30 +250,6 @@ struct KdTree {
   inline int ParentIndex(const int child) const {
     const int delta = ffs(child);
     return (child >> delta) << delta;
-  }
-
-  inline bool SearchLeaf(
-      const Scalar* const point, const int i, int k,
-#ifdef NOTOPK
-      std::priority_queue<std::pair<float, int>,
-                          std::vector<std::pair<float, int>>>* const q) const {
-#else
-      TopKV2* const q) const {
-#endif
-    const int index = indices[i];
-    const Scalar d = Distance(&data[index * N], point);
-
-    // Insert element to priority queue.
-#ifdef NOTOPK
-    if (q->size() < k || d < q->top().first) {
-      if (q->size() == k) {
-        q->pop();
-      }
-      q->emplace(d, index);
-    }
-#else
-    q->Add({d, index});
-#endif
   }
 
   inline bool SearchLeaf(
@@ -413,6 +389,10 @@ struct KdTree {
       //   return q.size() < k || d < q.top().first;
       // };
 
+      std::unordered_map<int, float> d_prv;
+      d_prv[0] = 0;
+      // fmt::print("reset");
+
       while (!anchors.empty()) {
         // Get element - DFS
         auto anchor = anchors.back();
@@ -424,7 +404,6 @@ struct KdTree {
         const int level = ax0 - fsb;
         const int axis = level % N;
 
-        // const int parent = ((anchor ^ (1 << (fsb - 1))) | (1 << fsb)) % size;
         // fmt::print("parent : {} size : {}\n", parent, size);
 
         // fmt::print("range : {} - {}\n", anchor-step*2, anchor+step*2);
@@ -442,9 +421,32 @@ struct KdTree {
         const bool search_rhs = (d2p >= 0) == anchor_sign;
 
         // Squared Distance to the separating hyperplane.
-        const Scalar d = d2p * d2p;
+        // Should technically be d_prv + (d2p * d2p),
+        // where d_prv is the accumulated distance to the hyperplane
+        // along each parent nodes.
+#if 0
+        const int parent = ((anchor ^ (1 << (fsb - 1))) | (1 << fsb)) % size;
+        const bool parent_sign =
+            data[indices[parent_sign] * N + (axis + N - 1) % N] <=
+            data[indices[anchor] * N + (axis + N - 1) % N];
+        const bool anchor_parent_sign = anchor & (1 << (fsb+1));
+        const Scalar d2p0 =
+            (parent_sign == anchor_parent_sign) ? 0 : d_prv[parent];
+        const Scalar d2p1 = d2p0 + d2p * d2p;
+        d_prv.emplace(anchor, d2p*d2p);
+        // fmt::print("[{}/{}] {} -> {}\n", parent, anchor, d2p0, d2p1);
+        // fmt::print("{} -> {}\n", d_prv[parent], d_prv[anchor]);
+
+        //if(d2p0 > q.top().first){
+        //    continue;
+        //}
+#else
+        // const Scalar d2p0 = 0;
+        const Scalar d2p1 = d2p * d2p;
+#endif
+
         // if (q.size()) {
-        // fmt::print("{} , {}\n", d, q.top().first);
+        // fmt::print("{} , {}\n", d2p1, q.top().first);
         // }
 
         // Process leaf node at either side of anchor plane.
@@ -454,14 +456,14 @@ struct KdTree {
             SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
 
             // Then Evaluate left of anchor.
-            if (q.size() < k || d < q.top().first) {
+            if (q.size() < k || d2p1 < q.top().first) {
               SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
             }
           } else {
             // Evaluate left of anchor first.
             SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
             // Then conditionally evaluate right of anchor.
-            if (q.size() < k || d < q.top().first) {
+            if (q.size() < k || d2p1 < q.top().first) {
               SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
             }
           }
@@ -470,20 +472,25 @@ struct KdTree {
 
         // Otherwise, propagate.
         const int step = 1 << (fsb - 2);
+        const Scalar worst = q.top().first;
         if (search_rhs) {
           // Other side of hyperplane is only evaluated if needed.
-          if (q.size() < k || d < q.top().first) {
+          if (q.size() < k || d2p1 < worst) {
             anchors.emplace_back(anchor - step);
           }
           // since dfs, the last one is evaluated first.
-          anchors.emplace_back(anchor + step);
+          if (true) {
+            anchors.emplace_back(anchor + step);
+          }
         } else {
           // Other side of hyperplane is only evaluated if needed.
-          if (q.size() < k || d < q.top().first) {
+          if (q.size() < k || d2p1 < worst) {
             anchors.emplace_back(anchor + step);
           }
           // since dfs, the last one is evaluated first.
-          anchors.emplace_back(anchor - step);
+          if (true) {
+            anchors.emplace_back(anchor - step);
+          }
         }
       }
       // fmt::print("Done\n");
@@ -612,9 +619,9 @@ void DrawKdTreeAtLevel(const KdTree<float, kDim>& tree, cv::Mat* const img,
                        std::array<float, kDim>& pmin,
                        std::array<float, kDim>& pmax,
                        const std::function<cv::Point2f(float, float)>& pmap) {
-  if (level >= 5) {
-    return;
-  }
+  // if (level >= 5) {
+  //  return;
+  //}
   const int num_points = tree.indices.size();
   const auto& indices = tree.indices;
 
@@ -644,19 +651,19 @@ void DrawKdTreeAtLevel(const KdTree<float, kDim>& tree, cv::Mat* const img,
     if (tree.data[indices[i0] * kDim + axis] <
         tree.data[indices[im] * kDim + axis]) {
       std::swap(pmax[axis], median);
-      DrawKdTreeAtLevel(tree, img, level + 1, i0, im, pmin, pmax, pmap);
+      DrawKdTreeAtLevel<kDim>(tree, img, level + 1, i0, im, pmin, pmax, pmap);
       std::swap(pmax[axis], median);
 
       std::swap(pmin[axis], median);
-      DrawKdTreeAtLevel(tree, img, level + 1, im, i1, pmin, pmax, pmap);
+      DrawKdTreeAtLevel<kDim>(tree, img, level + 1, im, i1, pmin, pmax, pmap);
       std::swap(pmin[axis], median);
     } else {
       std::swap(pmin[axis], median);
-      DrawKdTreeAtLevel(tree, img, level + 1, i0, im, pmin, pmax, pmap);
+      DrawKdTreeAtLevel<kDim>(tree, img, level + 1, i0, im, pmin, pmax, pmap);
       std::swap(pmin[axis], median);
 
       std::swap(pmax[axis], median);
-      DrawKdTreeAtLevel(tree, img, level + 1, im, i1, pmin, pmax, pmap);
+      DrawKdTreeAtLevel<kDim>(tree, img, level + 1, im, i1, pmin, pmax, pmap);
       std::swap(pmax[axis], median);
     }
 
@@ -730,7 +737,8 @@ void DrawKdTree2d(const KdTree<float, kDim>& tree, cv::Mat* const img) {
     cv::circle(*img, pmap(x, y), 1, cv::Scalar::all(255));
   }
 
-  DrawKdTreeAtLevel(tree, img, 0, 0, tree.indices.size(), pmin, pmax, pmap);
+  DrawKdTreeAtLevel<kDim>(
+      tree, img, 0, 0, static_cast<int>(tree.indices.size()), pmin, pmax, pmap);
   return;
 }
 
@@ -816,7 +824,7 @@ int main() {
 
   if (kDim == 2) {
     cv::Mat img(512, 512, CV_8UC3);
-    // DrawKdTree2d(tree, &img);
+    DrawKdTree2d(tree, &img);
     cv::imshow("tree", img);
     cv::imwrite("/tmp/kdtree.png", img);
     cv::waitKey(0);
