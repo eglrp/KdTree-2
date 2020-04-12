@@ -107,18 +107,18 @@ struct TopKV2 {
     if (values.size() < size_) {
       values.emplace_back(std::move(value));
       if (values.size() == size_) {
-        std::make_heap(values.data(), values.data()+size_);
+        std::make_heap(values.data(), values.data() + size_);
       }
     } else {
       if (value >= values[0]) {
         return;
       }
       values[0] = std::move(value);
-      heapreplace(values.data(), values.data()+size_);
+      heapreplace(values.data(), values.data() + size_);
     }
   }
 
-  //inline void Add(const std::pair<float, int>& value) {
+  // inline void Add(const std::pair<float, int>& value) {
   //  if (values.size() < size_) {
   //    values.emplace_back(value);
   //    if (values.size() == size_) {
@@ -142,7 +142,7 @@ struct TopKV3 {
   std::vector<std::pair<float, int>> values;
   int size_;
 
-  inline void Add(const std::pair<float, int>& value) {
+  inline void Add(std::pair<float, int>&& value) {
     if (values.size() < size_) {
       values.emplace_back(value);
       if (values.size() == size_) {
@@ -152,9 +152,18 @@ struct TopKV3 {
       if (value >= values.back()) {
         return;
       }
+
+      // for (auto it = values.rend(); it != values.rbegin(); ++it) {
+      //  if (value < *it) {
+      //    std::swap(value, *it);
+      //  }
+      //}
       auto it = std::lower_bound(values.begin(), values.end(), value);
       values.insert(it, value);
       values.pop_back();
+
+      // values.back()=value;
+      // std::sort(it,values.end());
     }
   }
 
@@ -223,13 +232,13 @@ struct KdTree {
     }
   }
 
-  int SearchNearestNeighbor(const Scalar* const point, int k,
-                            std::vector<int>* const out) const {
+  void SearchNearestNeighbor(const Scalar* const point, int k,
+                             std::vector<int>* const out) const {
     // Maintain best k entries.
     TopKV2 q(k);
-    std::deque<int> anchors;
+    std::stack<int> anchors;
     const int ax0 = ffs(size >> 1);
-    anchors.emplace_back(size >> 1);  // midpoint
+    anchors.emplace(size >> 1);  // midpoint
     bool ge_anchor = true;
 
     std::unordered_map<int, float> d_prv;
@@ -237,9 +246,8 @@ struct KdTree {
 
     while (!anchors.empty()) {
       // Get element - DFS, extract from back
-      auto anchor = anchors.back();
-      anchors.pop_back();
-      // fmt::print("anchor : {}\n", anchor);
+      auto anchor = anchors.top();
+      anchors.pop();
 
       // Determine separating plane.
       const int fsb = ffs(anchor);
@@ -261,43 +269,27 @@ struct KdTree {
       const Scalar d2p1 = d2p * d2p;
 
       // If leaf node, traverse through points and compare.
+      const int i00 = search_rhs ? 0 : -leaf_size;
+      const int i01 = search_rhs ? +leaf_size : 0;
+      const int i10 = search_rhs ? -leaf_size : 0;
+      const int i11 = search_rhs ? 0 : +leaf_size;
       if (anchor & leaf_size) {
-        if (search_rhs) {
-          // Evaluate right of anchor first.
-          SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
-          // Then Evaluate left of anchor.
-          if (q.size() < k || d2p1 < q.top().first) {
-            SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
-          }
-        } else {
-          // Evaluate left of anchor first.
-          SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
-          // Then conditionally evaluate right of anchor.
-          if (q.size() < k || d2p1 < q.top().first) {
-            SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
-          }
+        SearchLeaf(point, anchor + i00, anchor + i01, k, &q);
+        // Other side of hyperplane is only evaluated if needed.
+        if (q.size() < k || d2p1 < q.top().first) {
+          SearchLeaf(point, anchor + i10, anchor + i11, k, &q);
         }
         continue;
       }
 
       // Otherwise, propagate to subtree.
       const int step = 1 << (fsb - 2);
-      const Scalar worst = q.top().first;
-      if (search_rhs) {
-        // Other side of hyperplane is only evaluated if needed.
-        if (q.size() < k || d2p1 < worst) {
-          anchors.emplace_back(anchor - step);
-        }
-        // since dfs, the last one is evaluated first.
-        anchors.emplace_back(anchor + step);
-      } else {
-        // Other side of hyperplane is only evaluated if needed.
-        if (q.size() < k || d2p1 < worst) {
-          anchors.emplace_back(anchor + step);
-        }
-        // since dfs, the last one is evaluated first.
-        anchors.emplace_back(anchor - step);
+      // Other side of hyperplane is only evaluated if needed.
+      if (q.size() < k || d2p1 < q.top().first) {
+        anchors.emplace(anchor + (search_rhs ? -step : step));
       }
+      // since dfs, the last one is evaluated first.
+      anchors.emplace(anchor + (search_rhs ? step : -step));
     }
 
     // Export output.
@@ -305,7 +297,6 @@ struct KdTree {
     std::sort_heap(q.values.begin(), q.values.end());
     std::transform(q.values.begin(), q.values.end(), out->begin(),
                    [](const auto& v) { return v.second; });
-    return 1;
   }
 
   KdTree(Scalar* const data, int size, int leaf_size = 16)
@@ -463,7 +454,7 @@ int main() {
   constexpr const int kNumPoints(1024);
   constexpr const int kDim = 2;
 
-  constexpr const int kNumIter = 1;
+  constexpr const int kNumIter = 128;
   constexpr const int kNeighbors = 32;
 
   using KdTreeIndex = PointerAdaptor<float, kDim>;
