@@ -23,8 +23,6 @@
 
 #include "heap.hpp"
 
-// #define NOTOPK
-
 std::vector<int> anchor_cache;
 
 template <typename A, typename B>
@@ -109,34 +107,34 @@ struct TopKV2 {
     if (values.size() < size_) {
       values.emplace_back(std::move(value));
       if (values.size() == size_) {
-        std::make_heap(values.begin(), values.end());
+        std::make_heap(values.data(), values.data()+size_);
       }
     } else {
-      if (value >= values.front()) {
+      if (value >= values[0]) {
         return;
       }
-      values.front() = std::move(value);
-      heapreplace(values.begin(), values.end());
+      values[0] = std::move(value);
+      heapreplace(values.data(), values.data()+size_);
     }
   }
 
-  inline void Add(const std::pair<float, int>& value) {
-    if (values.size() < size_) {
-      values.emplace_back(value);
-      if (values.size() == size_) {
-        std::make_heap(values.begin(), values.end());
-      }
-    } else {
-      if (value >= values.front()) {
-        return;
-      }
-      values.front() = value;
-      heapreplace(values.begin(), values.end());
-    }
-  }
+  //inline void Add(const std::pair<float, int>& value) {
+  //  if (values.size() < size_) {
+  //    values.emplace_back(value);
+  //    if (values.size() == size_) {
+  //      std::make_heap(values.begin(), values.end());
+  //    }
+  //  } else {
+  //    if (value >= values[0]) {
+  //      return;
+  //    }
+  //    values[0] = value;
+  //    heapreplace(values.begin(), values.end());
+  //  }
+  //}
 
   inline const auto size() const { return values.size(); }
-  inline const std::pair<float, int>& top() const { return values.front(); }
+  inline const std::pair<float, int>& top() const { return values[0]; }
 };
 
 struct TopKV3 {
@@ -173,9 +171,12 @@ struct KdTree {
                                    const Scalar* const b) const {
     Scalar out{0};
     for (int i = 0; i < N; ++i) {
-      const float d = a[i] - b[i];
+#if 0
+      const Scalar d = a[i] - b[i];
       out += d * d;
-      // out += (a[i] - b[i]) * (a[i] - b[i]);
+#else
+      out += (a[i] - b[i]) * (a[i] - b[i]);
+#endif
     }
     return out;
   }
@@ -195,14 +196,9 @@ struct KdTree {
       const auto i1 = std::min(indices->end(), i0 + size);
       const auto im = i0 + half_size;
 
-      // TODO(yycho0108): Non-hacky way to deal with skipping higher-level
-      // anchors.
-      // fmt::print("{} ax={}\n", std::distance(indices->begin(), im), axis);
-
       // To ensure fair split, lesser/greater will depend on <parent>
-      // such that nodes on the same side as the parent will lie on the
-      // same hyperplane as the parent.
-
+      // such that nodes on the same side of the index as the parent will lie on
+      // the same side of the hyperplane as the parent.
       std::nth_element(i0 + 1, im, i1,
                        [dax, &axis](const int lhs, const int rhs) {
                          return dax[lhs * N] < dax[rhs * N];
@@ -216,373 +212,100 @@ struct KdTree {
     }
   }
 
-  void ComputeExtents() {
-    // Compute extents for visualization.
-    std::fill(pmin.begin(), pmin.end(), std::numeric_limits<float>::max());
-    std::fill(pmax.begin(), pmax.end(), std::numeric_limits<float>::lowest());
-    for (int i = 0; i < size; ++i) {
-      for (int j = 0; j < N; ++j) {
-        pmin[j] = std::min(pmin[j], data[i * N + j]);
-        pmax[j] = std::max(pmax[j], data[i * N + j]);
-      }
-    }
-  }
-
-  inline void GetExtents(const int index, const int level,
-                         std::array<float, 2>* const pmin,
-                         std::array<float, 2>* const pmax) const {
-    // pmin-pmax should be populated with global min-max already.
-    int parent = size >> 1;
-    for (int i = 0; i < level; ++i) {
-      const int axis = i % N;
-
-      // Determine if before or after anchor.
-      const int range = (size >> (i + 1));  // 8>>1 == 4
-      const bool sel = index & range;       // e.g. 7 = 111 == [>=4 | >=2 | >=1]
-      // fmt::print("parent {}\n", parent);
-      // fmt::print("axis {}\n", axis);
-      // fmt::print("index {} range {} sel : {}\n", index, range, sel);
-      (*(sel ? pmin : pmax))[axis] = data[parent * N + axis];
-      parent += (sel ? -1 : 1) * (range >> 1);
-    }
-  }
-
-  inline int ParentIndex(const int child) const {
-    const int delta = ffs(child);
-    return (child >> delta) << delta;
-  }
-
-  inline bool SearchLeaf(
-      const Scalar* const point, const int imin, const int imax, int k,
-#ifdef NOTOPK
-      std::priority_queue<std::pair<float, int>,
-                          std::vector<std::pair<float, int>>>* const q) const {
-#else
-      TopKV2* const q) const {
-#endif
+  inline bool SearchLeaf(const Scalar* const point, const int imin,
+                         const int imax, int k, TopKV2* const q) const {
     // Search leaf.
-    // fmt::print("{} - {}\n", imin, imax);
     for (int i = imin; i < imax; ++i) {
-      // SearchLeaf(point, i, k, q);
       const int index = indices[i];
       const Scalar d = Distance(&data[index * N], point);
-      // if (index == 4095) {
-      //  fmt::print(">>>>>>>>>>>>>>>>>>>>>>>4095!");
-      //  fmt::print("d : {}\n", d);
-      //}
-
       // Insert element to priority queue.
-#ifdef NOTOPK
-      if (q->size() < k || d < q->top().first) {
-        if (q->size() == k) {
-          q->pop();
-        }
-        q->emplace(d, index);
-      }
-#else
       q->Add({d, index});
-#endif
-    }
-  }
-
-  void RecursiveNeighborSearchInternal(const Scalar* const point, int anchor,
-                                       int level, int k, TopKV2* const q,
-                                       std::array<float, N>& pmin,
-                                       std::array<float, N>& pmax,
-                                       const bool lo) const {
-    fmt::print("anchor @ {} level {}\n", anchor, level);
-    // Compute minimum separation from point to bounding box.
-    // float d2p = std::numeric_limits<float>::max();
-    // for (int i = 0; i < N; ++i) {
-    //  d2p = std::min(pmin[i] - point[i], point[i] - pmax[i]);
-    //}
-    const int axis = level % N;
-
-    const Scalar d2p = point[axis] - data[indices[anchor] * N + axis];
-    const float d = d2p * d2p;
-    if (q->size() >= k && d2p > 0 && d >= q->top().first) {
-      return;
-    }
-
-    // leaf node
-    if (level == depth) {
-      fmt::print("level {}\n", level);
-      fmt::print("{}-{}\n", anchor - leaf_size / 2, anchor + leaf_size / 2);
-      SearchLeaf(point, anchor - leaf_size / 2, anchor + leaf_size / 2, q);
-      // if (lo) {
-      //  fmt::print("{}-{}\n", anchor - leaf_size, anchor);
-      //} else {
-      //  fmt::print("{}-{}\n", anchor, anchor + leaf_size);
-      //  SearchLeaf(point, anchor, anchor + leaf_size, q);
-      //}
-      return;
-    }
-
-    // Otherwise propagate.
-    float med = data[indices[anchor] * N + axis];
-    const int step = size >> (level + 2);
-    fmt::print("step {}\n", step);
-
-    // lhs
-    std::swap(pmax[axis], med);
-    RecursiveNeighborSearchInternal(point, anchor - step, level + 1, k, q, pmin,
-                                    pmax, true);
-    std::swap(pmax[axis], med);
-
-    // rhs
-    std::swap(pmin[axis], med);
-    RecursiveNeighborSearchInternal(point, anchor + step, level + 1, k, q, pmin,
-                                    pmax, false);
-    std::swap(pmin[axis], med);
-  }
-
-  int RecursiveNeighborSearch(const Scalar* const point, int k,
-                              std::vector<int>* const out) const {
-    TopKV2 q(k);
-    std::array<float, N> pmin_local = pmin;
-    std::array<float, N> pmax_local = pmax;
-    RecursiveNeighborSearchInternal(point, size >> 1, 0, k, &q, pmin_local,
-                                    pmax_local, 0);
-
-    out->clear();
-    out->reserve(k);
-    std::sort_heap(q.values.begin(), q.values.end());
-    for (const auto& v : q.values) {
-      out->emplace_back(v.second);
     }
   }
 
   int SearchNearestNeighbor(const Scalar* const point, int k,
                             std::vector<int>* const out) const {
     // Maintain best k entries.
-#ifdef NOTOPK
-    std::vector<std::pair<float, int>> container;
-    container.reserve(k);
-    const auto ptr = container.data();
-    std::priority_queue<std::pair<float, int>,
-                        std::vector<std::pair<float, int>>>
-    q(std::less<std::pair<float, int>>(), std::move(container));
-#else
     TopKV2 q(k);
-#endif
+    std::deque<int> anchors;
+    const int ax0 = ffs(size >> 1);
+    anchors.emplace_back(size >> 1);  // midpoint
+    bool ge_anchor = true;
 
-    // Search exact location for debugging ...
-    // std::priority_queue<std::pair<float, int>> dbgq;
-    // for (int i = 0; i < size; ++i) {
-    //  const float d = Distance(&data[indices[i] * N], point);
-    //  if (dbgq.size() < k || d < dbgq.top().first) {
-    //    if (dbgq.size() == k) {
-    //      dbgq.pop();
-    //    }
-    //    dbgq.emplace(d, indices[i]);
-    //  }
-    //}
-    // visited.resize(indices.size(), false);
-    {
-      std::deque<int> anchors;
-      const int ax0 = ffs(size >> 1);
-      anchors.emplace_back(size >> 1);  // midpoint
-      bool ge_anchor = true;
+    std::unordered_map<int, float> d_prv;
+    d_prv[0] = 0;
 
-      // Determine if the other side should be searched.
-      // auto expand = [&q, k](const float d) {
-      //   return q.size() < k || d < q.top().first;
-      // };
+    while (!anchors.empty()) {
+      // Get element - DFS, extract from back
+      auto anchor = anchors.back();
+      anchors.pop_back();
+      // fmt::print("anchor : {}\n", anchor);
 
-      std::unordered_map<int, float> d_prv;
-      d_prv[0] = 0;
-      // fmt::print("reset");
+      // Determine separating plane.
+      const int fsb = ffs(anchor);
+      const int level = ax0 - fsb;
+      const int axis = level % N;
 
-      while (!anchors.empty()) {
-        // Get element - DFS
-        auto anchor = anchors.back();
-        anchors.pop_back();
-        // fmt::print("anchor : {}\n", anchor);
+      // Determine which side of the anchor the point belongs.
+      // Compute distance to hyperplane.
+      const Scalar* const dax = data + axis;
+      const Scalar d2p = point[axis] - dax[indices[anchor] * N];
+      const bool anchor_sign =
+          dax[indices[anchor + 1] * N] >= dax[indices[anchor] * N];
+      const bool search_rhs = (d2p >= 0) == anchor_sign;
 
-        // Determine separating plane.
-        const int fsb = ffs(anchor);
-        const int level = ax0 - fsb;
-        const int axis = level % N;
+      // Squared Distance to the separating hyperplane.
+      // Should technically be d_prv + (d2p * d2p),
+      // where d_prv is the accumulated distance to the hyperplane
+      // along each parent nodes.
+      const Scalar d2p1 = d2p * d2p;
 
-        // fmt::print("parent : {} size : {}\n", parent, size);
-
-        // fmt::print("range : {} - {}\n", anchor-step*2, anchor+step*2);
-        // fmt::print("anchor {} ax={}\n", anchor, axis);
-
-        // Determine which side of the anchor the point belongs.
-
-        // distance to hyperplane
-        auto dax = data + axis;
-        const Scalar d2p = point[axis] - dax[indices[anchor] * N];
-
-        const bool anchor_sign =
-            dax[indices[anchor + 1] * N] >= dax[indices[anchor] * N];
-
-        const bool search_rhs = (d2p >= 0) == anchor_sign;
-
-        // Squared Distance to the separating hyperplane.
-        // Should technically be d_prv + (d2p * d2p),
-        // where d_prv is the accumulated distance to the hyperplane
-        // along each parent nodes.
-#if 0
-        const int parent = ((anchor ^ (1 << (fsb - 1))) | (1 << fsb)) % size;
-        const bool parent_sign =
-            data[indices[parent_sign] * N + (axis + N - 1) % N] <=
-            data[indices[anchor] * N + (axis + N - 1) % N];
-        const bool anchor_parent_sign = anchor & (1 << (fsb+1));
-        const Scalar d2p0 =
-            (parent_sign == anchor_parent_sign) ? 0 : d_prv[parent];
-        const Scalar d2p1 = d2p0 + d2p * d2p;
-        d_prv.emplace(anchor, d2p*d2p);
-        // fmt::print("[{}/{}] {} -> {}\n", parent, anchor, d2p0, d2p1);
-        // fmt::print("{} -> {}\n", d_prv[parent], d_prv[anchor]);
-
-        //if(d2p0 > q.top().first){
-        //    continue;
-        //}
-#else
-        // const Scalar d2p0 = 0;
-        const Scalar d2p1 = d2p * d2p;
-#endif
-
-        // if (q.size()) {
-        // fmt::print("{} , {}\n", d2p1, q.top().first);
-        // }
-
-        // Process leaf node at either side of anchor plane.
-        if (anchor & leaf_size) {
-          if (search_rhs) {
-            // Evaluate right of anchor first.
-            SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
-
-            // Then Evaluate left of anchor.
-            if (q.size() < k || d2p1 < q.top().first) {
-              SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
-            }
-          } else {
-            // Evaluate left of anchor first.
-            SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
-            // Then conditionally evaluate right of anchor.
-            if (q.size() < k || d2p1 < q.top().first) {
-              SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
-            }
-          }
-          continue;
-        }
-
-        // Otherwise, propagate.
-        const int step = 1 << (fsb - 2);
-        const Scalar worst = q.top().first;
+      // If leaf node, traverse through points and compare.
+      if (anchor & leaf_size) {
         if (search_rhs) {
-          // Other side of hyperplane is only evaluated if needed.
-          if (q.size() < k || d2p1 < worst) {
-            anchors.emplace_back(anchor - step);
-          }
-          // since dfs, the last one is evaluated first.
-          if (true) {
-            anchors.emplace_back(anchor + step);
+          // Evaluate right of anchor first.
+          SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
+          // Then Evaluate left of anchor.
+          if (q.size() < k || d2p1 < q.top().first) {
+            SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
           }
         } else {
-          // Other side of hyperplane is only evaluated if needed.
-          if (q.size() < k || d2p1 < worst) {
-            anchors.emplace_back(anchor + step);
-          }
-          // since dfs, the last one is evaluated first.
-          if (true) {
-            anchors.emplace_back(anchor - step);
+          // Evaluate left of anchor first.
+          SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
+          // Then conditionally evaluate right of anchor.
+          if (q.size() < k || d2p1 < q.top().first) {
+            SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
           }
         }
+        continue;
       }
-      // fmt::print("Done\n");
-      // if (q.top() != dbgq.top()) {
-      //  fmt::print("dbgq {}\n", dbgq);
-      //  fmt::print("q {}\n", q);
-      //  return false;
-      //}
 
-      // export
-#ifdef NOTOPK
-      out->resize(k);
-      std::transform(ptr, ptr + k, out->begin(),
-                     [](const auto& x) { return x.second; });
-      // std::copy(ptr, ptr + k, out->begin());
-      // for (int i = k - 1; i >= 0; --i) {
-      //  out->at(i) = q.top().second;
-      //  q.pop();
-      //}
-#else
-      out->clear();
-      out->reserve(k);
-      std::sort_heap(q.values.begin(), q.values.end());
-      for (const auto& v : q.values) {
-        out->emplace_back(v.second);
+      // Otherwise, propagate to subtree.
+      const int step = 1 << (fsb - 2);
+      const Scalar worst = q.top().first;
+      if (search_rhs) {
+        // Other side of hyperplane is only evaluated if needed.
+        if (q.size() < k || d2p1 < worst) {
+          anchors.emplace_back(anchor - step);
+        }
+        // since dfs, the last one is evaluated first.
+        anchors.emplace_back(anchor + step);
+      } else {
+        // Other side of hyperplane is only evaluated if needed.
+        if (q.size() < k || d2p1 < worst) {
+          anchors.emplace_back(anchor + step);
+        }
+        // since dfs, the last one is evaluated first.
+        anchors.emplace_back(anchor - step);
       }
-#endif
     }
 
+    // Export output.
+    out->resize(k);
+    std::sort_heap(q.values.begin(), q.values.end());
+    std::transform(q.values.begin(), q.values.end(), out->begin(),
+                   [](const auto& v) { return v.second; });
     return 1;
-#if 0
-    // Search node membership.
-    int anchor = 0;
-    bool ge_anchor = true;
-    for (int i = 0; i < depth; ++i) {
-      // 256, 256+{}
-      anchor += (ge_anchor ? 1 : -1) * (size >> (i + 1));
-      const int axis = i % N;
-      ge_anchor = point[axis] >= data[indices[anchor] * N + axis];
-    }
-
-    bool top_level = depth;
-    while (true) {
-      // Search leaf.
-      int imin = (ge_anchor) ? anchor : anchor - leaf_size;
-      int imax = (ge_anchor) ? anchor + leaf_size : anchor;
-      for (auto it = indices.begin() + imin; it != indices.begin() + imax;
-           ++it) {
-        const auto& index = *it;
-        const Scalar d = Distance(&data[index * N], point);
-
-        // Insert element to priority queue.
-        if (q.size() < k || d < q.top().first) {
-          if (q.size() == k) {
-            q.pop();
-          }
-          q.emplace(Distance(&data[index * N], point), index);
-        }
-      }
-
-      // Compute distance to separating plane.
-      const int axis = (depth - 1) % N;
-      const Scalar d =
-          (ge_anchor ? -1 : 1) * (point[axis] - data[anchor * N + axis]);
-
-      // Done if full and all other points are farther.
-      if (q.size() == k && d >= q.top().first) {
-        break;
-      }
-
-      // Determine next search target ...
-    }
-
-    // fmt::print("BestD : {}\n", q.top().first);
-    // const int axis = (depth - 1) % N;
-    // const Scalar d =
-    //    (ge_anchor ? -1 : 1) * (point[axis] - data[anchor * N + axis]);
-    // fmt::print("Distance to plane : {}\n", d);
-
-    // fmt::print("{} {}\n", imin, imax);
-
-    // const auto index =
-    //    *std::min_element(indices.begin() + imin, indices.begin() + imax,
-    //                      [this, &point](const int lhs, const int rhs) {
-    //                        return Distance(&data[lhs * N], point) <
-    //                               Distance(&data[rhs * N], point);
-    //                      });
-    //// output
-    // for (int i = 0; i < N; ++i) {
-    //  out[i] = data[index * N + i];
-    //}
-#endif
   }
 
   KdTree(Scalar* const data, int size, int leaf_size = 16)
@@ -597,10 +320,6 @@ struct KdTree {
     for (int i = 0; i < depth; ++i) {
       SplitLevel(i, &indices);
     }
-
-    if (1) {
-      ComputeExtents();
-    }
   }
 
   Scalar* data;
@@ -608,8 +327,6 @@ struct KdTree {
   int depth;
   int leaf_size;
   std::vector<int> indices;
-  std::array<Scalar, N> pmin;
-  std::array<Scalar, N> pmax;
   // mutable std::vector<bool> visited;
 };
 
@@ -743,11 +460,11 @@ void DrawKdTree2d(const KdTree<float, kDim>& tree, cv::Mat* const img) {
 }
 
 int main() {
-  constexpr const int kNumPoints(4096);
+  constexpr const int kNumPoints(1024);
   constexpr const int kDim = 2;
 
-  constexpr const int kNumIter = 16;
-  constexpr const int kNeighbors = 30;
+  constexpr const int kNumIter = 1;
+  constexpr const int kNeighbors = 32;
 
   using KdTreeIndex = PointerAdaptor<float, kDim>;
   using KdTreeNanoflann = nanoflann::KDTreeSingleIndexAdaptor<
@@ -773,7 +490,7 @@ int main() {
   std::vector<float> od(kNeighbors);
 
   // me
-  KdTree<float, kDim> tree(dat.data(), kNumPoints, 8);
+  KdTree<float, kDim> tree(dat.data(), kNumPoints, 16);
   std::vector<int> out(kNeighbors);
 
   {
