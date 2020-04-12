@@ -139,6 +139,31 @@ struct TopKV2 {
   inline const std::pair<float, int>& top() const { return values.front(); }
 };
 
+struct TopKV3 {
+  TopKV3(int size) : size_(size) { values.reserve(size + 1); }
+  std::vector<std::pair<float, int>> values;
+  int size_;
+
+  inline void Add(const std::pair<float, int>& value) {
+    if (values.size() < size_) {
+      values.emplace_back(value);
+      if (values.size() == size_) {
+        std::sort(values.begin(), values.end());
+      }
+    } else {
+      if (value >= values.back()) {
+        return;
+      }
+      auto it = std::lower_bound(values.begin(), values.end(), value);
+      values.insert(it, value);
+      values.pop_back();
+    }
+  }
+
+  inline int size() const { return values.size(); }
+  inline const std::pair<float, int>& top() const { return values.back(); }
+};
+
 template <typename Scalar = float, int N = 3>
 struct KdTree {
   /**
@@ -173,10 +198,33 @@ struct KdTree {
       // TODO(yycho0108): Non-hacky way to deal with skipping higher-level
       // anchors.
       // fmt::print("{} ax={}\n", std::distance(indices->begin(), im), axis);
-      std::nth_element(i0 + (i0 != indices->begin()), im, i1,
+
+      // To ensure fair split, lesser/greater will depend on <parent>
+      // such that nodes on the same side as the parent will lie on the
+      // same hyperplane as the parent.
+
+      std::nth_element(i0 + 1, im, i1,
                        [dax, &axis](const int lhs, const int rhs) {
                          return dax[lhs * N] < dax[rhs * N];
                        });
+      const bool lt = dax[*i0 * N] < dax[*im * N];
+      if (!lt) {
+        // median will be the same, so just swap lhs and rhs.
+        // now lhs is greater, rhs is less.
+        std::swap_ranges(i0 + 1, im, im + 1);
+      }
+    }
+  }
+
+  void ComputeExtents() {
+    // Compute extents for visualization.
+    std::fill(pmin.begin(), pmin.end(), std::numeric_limits<float>::max());
+    std::fill(pmax.begin(), pmax.end(), std::numeric_limits<float>::lowest());
+    for (int i = 0; i < size; ++i) {
+      for (int j = 0; j < N; ++j) {
+        pmin[j] = std::min(pmin[j], data[i * N + j]);
+        pmax[j] = std::max(pmax[j], data[i * N + j]);
+      }
     }
   }
 
@@ -242,6 +290,10 @@ struct KdTree {
       // SearchLeaf(point, i, k, q);
       const int index = indices[i];
       const Scalar d = Distance(&data[index * N], point);
+      // if (index == 4095) {
+      //  fmt::print(">>>>>>>>>>>>>>>>>>>>>>>4095!");
+      //  fmt::print("d : {}\n", d);
+      //}
 
       // Insert element to priority queue.
 #ifdef NOTOPK
@@ -254,6 +306,73 @@ struct KdTree {
 #else
       q->Add({d, index});
 #endif
+    }
+  }
+
+  void RecursiveNeighborSearchInternal(const Scalar* const point, int anchor,
+                                       int level, int k, TopKV2* const q,
+                                       std::array<float, N>& pmin,
+                                       std::array<float, N>& pmax,
+                                       const bool lo) const {
+    fmt::print("anchor @ {} level {}\n", anchor, level);
+    // Compute minimum separation from point to bounding box.
+    // float d2p = std::numeric_limits<float>::max();
+    // for (int i = 0; i < N; ++i) {
+    //  d2p = std::min(pmin[i] - point[i], point[i] - pmax[i]);
+    //}
+    const int axis = level % N;
+
+    const Scalar d2p = point[axis] - data[indices[anchor] * N + axis];
+    const float d = d2p * d2p;
+    if (q->size() >= k && d2p > 0 && d >= q->top().first) {
+      return;
+    }
+
+    // leaf node
+    if (level == depth) {
+      fmt::print("level {}\n", level);
+      fmt::print("{}-{}\n", anchor - leaf_size / 2, anchor + leaf_size / 2);
+      SearchLeaf(point, anchor - leaf_size / 2, anchor + leaf_size / 2, q);
+      // if (lo) {
+      //  fmt::print("{}-{}\n", anchor - leaf_size, anchor);
+      //} else {
+      //  fmt::print("{}-{}\n", anchor, anchor + leaf_size);
+      //  SearchLeaf(point, anchor, anchor + leaf_size, q);
+      //}
+      return;
+    }
+
+    // Otherwise propagate.
+    float med = data[indices[anchor] * N + axis];
+    const int step = size >> (level + 2);
+    fmt::print("step {}\n", step);
+
+    // lhs
+    std::swap(pmax[axis], med);
+    RecursiveNeighborSearchInternal(point, anchor - step, level + 1, k, q, pmin,
+                                    pmax, true);
+    std::swap(pmax[axis], med);
+
+    // rhs
+    std::swap(pmin[axis], med);
+    RecursiveNeighborSearchInternal(point, anchor + step, level + 1, k, q, pmin,
+                                    pmax, false);
+    std::swap(pmin[axis], med);
+  }
+
+  int RecursiveNeighborSearch(const Scalar* const point, int k,
+                              std::vector<int>* const out) const {
+    TopKV2 q(k);
+    std::array<float, N> pmin_local = pmin;
+    std::array<float, N> pmax_local = pmax;
+    RecursiveNeighborSearchInternal(point, size >> 1, 0, k, &q, pmin_local,
+                                    pmax_local, 0);
+
+    out->clear();
+    out->reserve(k);
+    std::sort_heap(q.values.begin(), q.values.end());
+    for (const auto& v : q.values) {
+      out->emplace_back(v.second);
     }
   }
 
@@ -304,14 +423,23 @@ struct KdTree {
         const int fsb = ffs(anchor);
         const int level = ax0 - fsb;
         const int axis = level % N;
+
+        // const int parent = ((anchor ^ (1 << (fsb - 1))) | (1 << fsb)) % size;
+        // fmt::print("parent : {} size : {}\n", parent, size);
+
         // fmt::print("range : {} - {}\n", anchor-step*2, anchor+step*2);
         // fmt::print("anchor {} ax={}\n", anchor, axis);
 
         // Determine which side of the anchor the point belongs.
 
         // distance to hyperplane
-        const Scalar d2p = point[axis] - data[indices[anchor] * N + axis];
-        const bool ge_anchor = d2p >= 0;
+        auto dax = data + axis;
+        const Scalar d2p = point[axis] - dax[indices[anchor] * N];
+
+        const bool anchor_sign =
+            dax[indices[anchor + 1] * N] >= dax[indices[anchor] * N];
+
+        const bool search_rhs = (d2p >= 0) == anchor_sign;
 
         // Squared Distance to the separating hyperplane.
         const Scalar d = d2p * d2p;
@@ -319,19 +447,15 @@ struct KdTree {
         // fmt::print("{} , {}\n", d, q.top().first);
         // }
 
-        // Process leaf node.
+        // Process leaf node at either side of anchor plane.
         if (anchor & leaf_size) {
-          if (ge_anchor) {
+          if (search_rhs) {
             // Evaluate right of anchor first.
             SearchLeaf(point, anchor, anchor + leaf_size, k, &q);
 
             // Then Evaluate left of anchor.
             if (q.size() < k || d < q.top().first) {
               SearchLeaf(point, anchor - leaf_size, anchor, k, &q);
-            } else {
-              // Evaluate parent node, whose hyperplane membership is
-              // unclear.
-              SearchLeaf(point, anchor - leaf_size, k, &q);
             }
           } else {
             // Evaluate left of anchor first.
@@ -346,22 +470,19 @@ struct KdTree {
 
         // Otherwise, propagate.
         const int step = 1 << (fsb - 2);
-        if (ge_anchor) {
+        if (search_rhs) {
           // Other side of hyperplane is only evaluated if needed.
           if (q.size() < k || d < q.top().first) {
             anchors.emplace_back(anchor - step);
-          } else {
-            // Parent node still needs to be searched, hyperplane not guaranteed
-            if (anchor - 2 * step >= 0) {
-              SearchLeaf(point, anchor - 2 * step, k, &q);
-            }
           }
+          // since dfs, the last one is evaluated first.
           anchors.emplace_back(anchor + step);
         } else {
           // Other side of hyperplane is only evaluated if needed.
           if (q.size() < k || d < q.top().first) {
             anchors.emplace_back(anchor + step);
           }
+          // since dfs, the last one is evaluated first.
           anchors.emplace_back(anchor - step);
         }
       }
@@ -469,6 +590,10 @@ struct KdTree {
     for (int i = 0; i < depth; ++i) {
       SplitLevel(i, &indices);
     }
+
+    if (1) {
+      ComputeExtents();
+    }
   }
 
   Scalar* data;
@@ -476,17 +601,20 @@ struct KdTree {
   int depth;
   int leaf_size;
   std::vector<int> indices;
+  std::array<Scalar, N> pmin;
+  std::array<Scalar, N> pmax;
   // mutable std::vector<bool> visited;
 };
 
-void DrawKdTreeAtLevel(const KdTree<float, 2>& tree, cv::Mat* const img,
+template <int kDim = 2>
+void DrawKdTreeAtLevel(const KdTree<float, kDim>& tree, cv::Mat* const img,
                        const int level, int i0, int i1,
-                       std::array<float, 2>& pmin, std::array<float, 2>& pmax,
+                       std::array<float, kDim>& pmin,
+                       std::array<float, kDim>& pmax,
                        const std::function<cv::Point2f(float, float)>& pmap) {
-  //if (level >= 3) {
-  //  return;
-  //}
-  static constexpr const int kDim = 2;
+  if (level >= 5) {
+    return;
+  }
   const int num_points = tree.indices.size();
   const auto& indices = tree.indices;
 
@@ -511,25 +639,37 @@ void DrawKdTreeAtLevel(const KdTree<float, 2>& tree, cv::Mat* const img,
     const auto& x = tree.data[indices[im] * kDim];
     const auto& y = tree.data[indices[im] * kDim + 1];
     // fmt::print("Anchor2 @ {} = ({},{})\n", im, x, y);
-    const float median = tree.data[indices[im] * kDim + axis];
+    float median = tree.data[indices[im] * kDim + axis];
 
-    float mn = pmin[axis];
-    float mx = pmax[axis];
+    if (tree.data[indices[i0] * kDim + axis] <
+        tree.data[indices[im] * kDim + axis]) {
+      std::swap(pmax[axis], median);
+      DrawKdTreeAtLevel(tree, img, level + 1, i0, im, pmin, pmax, pmap);
+      std::swap(pmax[axis], median);
 
-    pmax[axis] = median;
-    DrawKdTreeAtLevel(tree, img, level + 1, i0, im, pmin, pmax, pmap);
-    pmax[axis] = mx;
+      std::swap(pmin[axis], median);
+      DrawKdTreeAtLevel(tree, img, level + 1, im, i1, pmin, pmax, pmap);
+      std::swap(pmin[axis], median);
+    } else {
+      std::swap(pmin[axis], median);
+      DrawKdTreeAtLevel(tree, img, level + 1, i0, im, pmin, pmax, pmap);
+      std::swap(pmin[axis], median);
 
-    pmin[axis] = median;
-    DrawKdTreeAtLevel(tree, img, level + 1, im, i1, pmin, pmax, pmap);
-    pmin[axis] = mn;
+      std::swap(pmax[axis], median);
+      DrawKdTreeAtLevel(tree, img, level + 1, im, i1, pmin, pmax, pmap);
+      std::swap(pmax[axis], median);
+    }
 
     // Draw the splitting line.
     {
+      float mn = pmin[axis];
+      float mx = pmax[axis];
       pmin[axis] = median;
       pmax[axis] = median;
-      cv::line(*img, pmap(pmin[0], pmin[1]), pmap(pmax[0], pmax[1]),
-               cv::Scalar::all(255));
+      cv::line(
+          *img, pmap(pmin[0], pmin[1]), pmap(pmax[0], pmax[1]),
+          cv::Scalar((level % 3 == 2) ? 255 : 128, (level % 3 == 1) ? 255 : 128,
+                     (level % 3 == 0) ? 255 : 128));
       pmin[axis] = mn;
       pmax[axis] = mx;
     }
@@ -542,8 +682,10 @@ void DrawKdTreeAtLevel(const KdTree<float, 2>& tree, cv::Mat* const img,
     }
   }
 }
-void DrawKdTree2d(const KdTree<float, 2>& tree, cv::Mat* const img) {
-  static constexpr const int kDim = 2;
+
+template <int kDim = 2>
+void DrawKdTree2d(const KdTree<float, kDim>& tree, cv::Mat* const img) {
+  // static constexpr const int kDim = 2;
   const int num_points = tree.indices.size();
 
   // Compute extents for visualization.
@@ -593,11 +735,11 @@ void DrawKdTree2d(const KdTree<float, 2>& tree, cv::Mat* const img) {
 }
 
 int main() {
-  constexpr const int kNumPoints(1024);
+  constexpr const int kNumPoints(4096);
   constexpr const int kDim = 2;
 
-  constexpr const int kNumIter = 128;
-  constexpr const int kNeighbors = 17;
+  constexpr const int kNumIter = 16;
+  constexpr const int kNeighbors = 30;
 
   using KdTreeIndex = PointerAdaptor<float, kDim>;
   using KdTreeNanoflann = nanoflann::KDTreeSingleIndexAdaptor<
@@ -610,7 +752,8 @@ int main() {
   const auto seed =
       std::chrono::high_resolution_clock::now().time_since_epoch().count();
   // const auto seed = 1586637242494121116;
-  fmt::print("Seed = {}\n", seed);
+  // const auto seed = 1586689800866777869;
+  // fmt::print("Seed = {}\n", seed);
   rng.SetSeed(seed);
   std::generate(dat.begin(), dat.end(), [&rng]() { return rng.Randu(); });
 
@@ -632,6 +775,7 @@ int main() {
     for (int m = 0; m < kNumIter; ++m) {
       for (int i = 0; i < kNumPoints; ++i) {
         tree.SearchNearestNeighbor(&dat[i * kDim], kNeighbors, &out);
+        // tree.RecursiveNeighborSearch(&dat[i * kDim], kNeighbors, &out);
         dummy += out.back();
 
         // if (nbr == 0) {
@@ -641,6 +785,7 @@ int main() {
       }
     }
     CALLGRIND_TOGGLE_COLLECT;
+    fmt::print("?{}\n", dat[kNumPoints - 1 * kDim]);
     fmt::print("me    {} ms\n", timer.StopAndGetElapsedTime());
     fmt::print("dummy {}\n", dummy);
   }
@@ -654,6 +799,8 @@ int main() {
         dummy += oi.back();
       }
     }
+
+    fmt::print("?{}\n", dat[kNumPoints - 1 * kDim]);
     fmt::print("nano  {} ms\n", timer.StopAndGetElapsedTime());
     fmt::print("dummy {}\n", dummy);
   }
@@ -666,11 +813,14 @@ int main() {
   //}
 
   // fmt::print("{}\n", nbr);
-  cv::Mat img(512, 512, CV_8UC1);
-  DrawKdTree2d(tree, &img);
-  cv::imshow("tree", img);
-  cv::imwrite("/tmp/kdtree.png", img);
-  cv::waitKey(0);
+
+  if (kDim == 2) {
+    cv::Mat img(512, 512, CV_8UC3);
+    // DrawKdTree2d(tree, &img);
+    cv::imshow("tree", img);
+    cv::imwrite("/tmp/kdtree.png", img);
+    cv::waitKey(0);
+  }
   // for (const auto& i : tree.indices) {
   //  fmt::print("{}\n", i);
   //}
