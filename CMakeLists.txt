@@ -27,7 +27,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES} ${HDR_FILES})
 target_include_directories(${PROJECT_NAME} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
     ${ChoUtil_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS}
     )
-target_link_libraries(${PROJECT_NAME} fmt ChoUtil::core ChoUtil::util ${OpenCV_LIBRARIES})# nanoflann::nanoflann)
+target_link_libraries(${PROJECT_NAME} fmt ChoUtil::core ChoUtil::util ChoUtil::vis ${OpenCV_LIBRARIES})# nanoflann::nanoflann)
 
 # Copy scripts.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts")

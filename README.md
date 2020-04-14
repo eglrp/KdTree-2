@@ -2,9 +2,13 @@
 
 Simple KDTree implementation.
 
-## Visualization
+## Visualization (2D)
 
-![kdtree](kdtree.png)
+![kdtree-2d](figs/kdtree.png)
+
+## Visualization (3D)
+
+![kdtree-3d](figs/kdtree.gif)
 
 ## Sample terminal output
 

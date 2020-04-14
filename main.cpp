@@ -18,6 +18,8 @@
 
 #include <cho_util/core/random.hpp>
 #include <cho_util/util/timer.hpp>
+#include <cho_util/vis/embedded_viewer.hpp>
+#include <cho_util/vis/render_data.hpp>
 
 #include <valgrind/callgrind.h>
 
@@ -105,10 +107,15 @@ struct TopKV2 {
 
   inline void Add(std::pair<float, int>&& value) {
     if (values.size() < size_) {
+#if 1
       values.emplace_back(std::move(value));
       if (values.size() == size_) {
         std::make_heap(values.data(), values.data() + size_);
       }
+#else
+      values.emplace_back(std::move(value));
+      std::push_heap(values.begin(), values.end());
+#endif
     } else {
       if (value >= values[0]) {
         return;
@@ -158,9 +165,20 @@ struct TopKV3 {
       //    std::swap(value, *it);
       //  }
       //}
-      auto it = std::lower_bound(values.begin(), values.end(), value);
-      values.insert(it, value);
+      // auto it = std::lower_bound(values.begin(), values.end(), value);
+
+#if 1
+      auto it = std::lower_bound(values.rbegin(), values.rend(), value,
+                                 std::greater<std::pair<float, int>>());
+      values.insert(it.base(), value);
       values.pop_back();
+#else
+      for (auto& v : values) {
+        if (v > value) {
+          std::swap(v, value);
+        }
+      }
+#endif
 
       // values.back()=value;
       // std::sort(it,values.end());
@@ -222,7 +240,8 @@ struct KdTree {
   }
 
   inline bool SearchLeaf(const Scalar* const point, const int imin,
-                         const int imax, int k, TopKV2* const q) const {
+                         const int imax, TopKV2* const q) const {
+    // fmt::print("{}~{}\n", imin, imax);
     // Search leaf.
     for (int i = imin; i < imax; ++i) {
       const int index = indices[i];
@@ -230,6 +249,150 @@ struct KdTree {
       // Insert element to priority queue.
       q->Add({d, index});
     }
+  }
+
+  void VisitBoxesAtLevel(
+      int anchor, int level, std::array<Scalar, N>& pmin,
+      std::array<Scalar, N>& pmax,
+      const std::function<void(const std::array<Scalar, N>&,
+                               std::array<Scalar, N>&)>& on_box) const {
+    const int step = size >> (level + 2);
+    if (0) {
+      on_box(pmin, pmax);
+    } else {
+      // Actual bounds.
+      std::array<Scalar, N> bmin = pmax, bmax = pmin;
+      std::fill(bmin.begin(), bmin.end(), std::numeric_limits<float>::max());
+      std::fill(bmax.begin(), bmax.end(), std::numeric_limits<float>::lowest());
+      for (int i = anchor - 2 * step; i < anchor + 2 * step; ++i) {
+        for (int j = 0; j < N; ++j) {
+          bmin[j] = std::min(bmin[j], data[indices[i] * N + j]);
+          bmax[j] = std::max(bmax[j], data[indices[i] * N + j]);
+        }
+      }
+      on_box(bmin, bmax);
+    }
+
+    // Skip leaf node.
+    if (level >= depth) {
+      return;
+    }
+
+    // >> Non-leaf.
+    const int axis = level % N;
+    const Scalar* const dax = data + axis;
+    float med = dax[indices[anchor] * N];
+
+    // Determine search order.
+    // NOTE(ycho-or): Repeating d2p compute.
+    const bool anchor_sign = dax[indices[anchor + 1] * N] >= med;
+
+    Scalar& lim_lhs = (anchor_sign ? pmax : pmin)[axis];
+    Scalar& lim_rhs = (anchor_sign ? pmin : pmax)[axis];
+
+    // Consider reviving this
+    const bool search_rhs = true;
+
+    Scalar& lim_top = search_rhs ? lim_rhs : lim_lhs;
+    Scalar& lim_bot = search_rhs ? lim_lhs : lim_rhs;
+
+    // Update bounds and search first child.
+    std::swap(lim_top, med);
+    VisitBoxesAtLevel(anchor + (search_rhs ? step : -step), level + 1, pmin,
+                      pmax, on_box);
+    std::swap(lim_top, med);
+
+    // Update bounds and search second child.
+    std::swap(lim_bot, med);
+    VisitBoxesAtLevel(anchor + (search_rhs ? -step : step), level + 1, pmin,
+                      pmax, on_box);
+    std::swap(lim_bot, med);
+  }
+
+  void VisitBoxes(
+      const std::function<void(const std::array<Scalar, N>&,
+                               std::array<Scalar, N>&)>& on_box) const {
+    VisitBoxesAtLevel(size >> 1, 0, const_cast<std::array<Scalar, N>&>(pmin),
+                      const_cast<std::array<Scalar, N>&>(pmax), on_box);
+  }
+
+  void SearchNearestNeighborRecursiveLevel(const Scalar* const point, int k,
+                                           int anchor, int level,
+                                           std::array<Scalar, N>& pmin,
+                                           std::array<Scalar, N>& pmax,
+                                           TopKV2* const q) const {
+    // Determine distance to bounding box.
+    Scalar d{0};
+    for (int i = 0; i < N; ++i) {
+      const Scalar delta =
+          std::max({pmin[i] - point[i], Scalar{0.0f}, point[i] - pmax[i]});
+      d += delta * delta;
+    }
+
+    // If too far, then skip.
+    if (q->size() >= k && d >= q->top().first) {
+      return;
+    }
+
+    const int step = size >> (level + 2);
+    // Process leaf node.
+    if (level >= depth) {
+      // fmt::print(":) {}\n", anchor & leaf_size);
+      SearchLeaf(point, anchor - 2 * step, anchor + 2 * step, q);
+      return;
+    }
+
+    // >> Non-leaf.
+    const int axis = level % N;
+    const Scalar* const dax = data + axis;
+    float med = dax[indices[anchor] * N];
+
+    // Determine search order.
+    // NOTE(ycho-or): Repeating d2p compute.
+    const float d2p = point[axis] - med;
+    const bool anchor_sign = dax[indices[anchor + 1] * N] >= med;
+    const bool search_rhs = (d2p >= 0) == anchor_sign;
+
+    Scalar& lim_lhs = (anchor_sign ? pmax : pmin)[axis];
+    Scalar& lim_rhs = (anchor_sign ? pmin : pmax)[axis];
+
+    Scalar& lim_top = search_rhs ? lim_rhs : lim_lhs;
+    Scalar& lim_bot = search_rhs ? lim_lhs : lim_rhs;
+
+    // Update bounds and search first child.
+    std::swap(lim_top, med);
+    SearchNearestNeighborRecursiveLevel(point, k,
+                                        anchor + (search_rhs ? step : -step),
+                                        level + 1, pmin, pmax, q);
+    std::swap(lim_top, med);
+
+    // Update bounds and search second child.
+    std::swap(lim_bot, med);
+    SearchNearestNeighborRecursiveLevel(point, k,
+                                        anchor + (search_rhs ? -step : step),
+                                        level + 1, pmin, pmax, q);
+    std::swap(lim_bot, med);
+  }
+
+  void SearchNearestNeighborRecursive(const Scalar* const point, int k,
+                                      std::vector<int>* const out,
+                                      const bool sort = false) const {
+    // Priority queue of neighbors.
+    TopKV2 q(k);
+
+    // pmin and pmax are not actually modified, safe to const cast.
+    // NOTE(ycho-or): May want to NOT do this if threading.
+    SearchNearestNeighborRecursiveLevel(
+        point, k, size >> 1, 0, const_cast<std::array<Scalar, N>&>(pmin),
+        const_cast<std::array<Scalar, N>&>(pmax), &q);
+
+    // Export output.
+    out->resize(k);
+    if (sort) {
+      std::sort_heap(q.values.begin(), q.values.end());
+    }
+    std::transform(q.values.begin(), q.values.end(), out->begin(),
+                   [](const auto& v) { return v.second; });
   }
 
   void SearchNearestNeighbor(const Scalar* const point, int k,
@@ -274,10 +437,10 @@ struct KdTree {
       const int i10 = search_rhs ? -leaf_size : 0;
       const int i11 = search_rhs ? 0 : +leaf_size;
       if (anchor & leaf_size) {
-        SearchLeaf(point, anchor + i00, anchor + i01, k, &q);
+        SearchLeaf(point, anchor + i00, anchor + i01, &q);
         // Other side of hyperplane is only evaluated if needed.
         if (q.size() < k || d2p1 < q.top().first) {
-          SearchLeaf(point, anchor + i10, anchor + i11, k, &q);
+          SearchLeaf(point, anchor + i10, anchor + i11, &q);
         }
         continue;
       }
@@ -311,6 +474,21 @@ struct KdTree {
     for (int i = 0; i < depth; ++i) {
       SplitLevel(i, &indices);
     }
+
+    ComputeExtents(&pmin, &pmax);
+  }
+
+  void ComputeExtents(std::array<Scalar, N>* const pmin,
+                      std::array<Scalar, N>* const pmax) const {
+    std::fill(pmin->begin(), pmin->end(), std::numeric_limits<Scalar>::max());
+    std::fill(pmax->begin(), pmax->end(),
+              std::numeric_limits<Scalar>::lowest());
+    for (int i = 0; i < size; ++i) {
+      for (int j = 0; j < N; ++j) {
+        (*pmin)[j] = std::min((*pmin)[j], data[i * N + j]);
+        (*pmax)[j] = std::max((*pmax)[j], data[i * N + j]);
+      }
+    }
   }
 
   Scalar* data;
@@ -318,7 +496,7 @@ struct KdTree {
   int depth;
   int leaf_size;
   std::vector<int> indices;
-  // mutable std::vector<bool> visited;
+  std::array<Scalar, N> pmin, pmax;
 };
 
 template <int kDim = 2>
@@ -451,10 +629,10 @@ void DrawKdTree2d(const KdTree<float, kDim>& tree, cv::Mat* const img) {
 }
 
 int main() {
-  constexpr const int kNumPoints(1024);
-  constexpr const int kDim = 2;
+  constexpr const int kNumPoints(256);
+  constexpr const int kDim = 3;
 
-  constexpr const int kNumIter = 128;
+  constexpr const int kNumIter = 64;
   constexpr const int kNeighbors = 32;
 
   using KdTreeIndex = PointerAdaptor<float, kDim>;
@@ -465,11 +643,11 @@ int main() {
 
   // Fill with random data
   auto& rng = cho_util::core::RNG::GetInstance();
-  const auto seed =
-      std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  // const auto seed =
+  // std::chrono::high_resolution_clock::now().time_since_epoch().count();
   // const auto seed = 1586637242494121116;
-  // const auto seed = 1586689800866777869;
-  // fmt::print("Seed = {}\n", seed);
+  const auto seed = 1586689800866777869;
+  fmt::print("Seed = {}\n", seed);
   rng.SetSeed(seed);
   std::generate(dat.begin(), dat.end(), [&rng]() { return rng.Randu(); });
 
@@ -487,11 +665,11 @@ int main() {
   {
     int dummy{0};
     cho_util::util::MTimer timer{true};
-    CALLGRIND_TOGGLE_COLLECT;
     for (int m = 0; m < kNumIter; ++m) {
       for (int i = 0; i < kNumPoints; ++i) {
-        tree.SearchNearestNeighbor(&dat[i * kDim], kNeighbors, &out);
-        // tree.RecursiveNeighborSearch(&dat[i * kDim], kNeighbors, &out);
+        tree.SearchNearestNeighborRecursive(&dat[i * kDim], kNeighbors, &out,
+                                            false);
+        // tree.SearchNearestNeighbor(&dat[i * kDim], kNeighbors, &out);
         dummy += out.back();
 
         // if (nbr == 0) {
@@ -500,7 +678,6 @@ int main() {
         //}
       }
     }
-    CALLGRIND_TOGGLE_COLLECT;
     fmt::print("?{}\n", dat[kNumPoints - 1 * kDim]);
     fmt::print("me    {} ms\n", timer.StopAndGetElapsedTime());
     fmt::print("dummy {}\n", dummy);
@@ -509,12 +686,14 @@ int main() {
   {
     int dummy{0};
     cho_util::util::MTimer timer{true};
+    CALLGRIND_TOGGLE_COLLECT;
     for (int m = 0; m < kNumIter; ++m) {
       for (int i = 0; i < kNumPoints; ++i) {
         tree2.knnSearch(&dat[i * kDim], kNeighbors, oi.data(), od.data());
         dummy += oi.back();
       }
     }
+    CALLGRIND_TOGGLE_COLLECT;
 
     fmt::print("?{}\n", dat[kNumPoints - 1 * kDim]);
     fmt::print("nano  {} ms\n", timer.StopAndGetElapsedTime());
@@ -536,6 +715,53 @@ int main() {
     cv::imshow("tree", img);
     cv::imwrite("/tmp/kdtree.png", img);
     cv::waitKey(0);
+  } else if (kDim == 3) {
+    namespace cuv = cho_util::vis;
+    cuv::EmbeddedViewer v{true};
+    // Render points
+    {
+      cuv::RenderData rd;
+      rd.render_type = cuv::RenderData::RenderType::kPoints;
+      rd.data = dat;
+      rd.tag = "points";
+      rd.quit = false;
+      v.Render(rd);
+    }
+
+    // Render boxes
+    {
+      cuv::RenderData rd;
+      rd.render_type = cuv::RenderData::RenderType::kBox;
+      rd.quit = false;
+      int count = 0;
+      rd.data.resize(6);
+      rd.color.resize(3);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10000));
+      tree.VisitBoxes([&rd, &v, &count, &rng](
+                          const std::array<float, kDim>& bmin,
+                          const std::array<float, kDim>& bmax) {
+        std::copy(bmin.begin(), bmin.end(), rd.data.begin());
+        std::copy(bmax.begin(), bmax.end(), rd.data.begin() + kDim);
+        std::generate(rd.color.begin(), rd.color.end(),
+                      [&rng]() -> std::uint8_t { return rng.Uniform(0, 255); });
+
+        rd.tag = fmt::format("box-{}", count);
+        // rd.tag = fmt::format("box", count);
+
+        rd.representation = cuv::RenderData::Representation::kSurface;
+        v.Render(rd);
+
+        rd.tag += "-edge";
+        rd.representation = cuv::RenderData::Representation::kWireframe;
+        v.Render(rd);
+
+        ++count;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      });
+    }
+
+    // wait
+    std::this_thread::sleep_for(std::chrono::seconds(100));
   }
   // for (const auto& i : tree.indices) {
   //  fmt::print("{}\n", i);
