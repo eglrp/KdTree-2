@@ -284,7 +284,7 @@ struct KdTree {
     float med = dax[indices[anchor] * N];
 
     // Determine search order.
-    // NOTE(ycho-or): Repeating d2p compute.
+    // NOTE(yycho0108): Repeating d2p compute.
     const bool anchor_sign = dax[indices[anchor + 1] * N] >= med;
 
     Scalar& lim_lhs = (anchor_sign ? pmax : pmin)[axis];
@@ -348,7 +348,7 @@ struct KdTree {
     float med = dax[indices[anchor] * N];
 
     // Determine search order.
-    // NOTE(ycho-or): Repeating d2p compute.
+    // NOTE(yycho0108): Repeating d2p compute.
     const float d2p = point[axis] - med;
     const bool anchor_sign = dax[indices[anchor + 1] * N] >= med;
     const bool search_rhs = (d2p >= 0) == anchor_sign;
@@ -381,7 +381,7 @@ struct KdTree {
     TopKV2 q(k);
 
     // pmin and pmax are not actually modified, safe to const cast.
-    // NOTE(ycho-or): May want to NOT do this if threading.
+    // NOTE(yycho0108): May want to NOT do this if threading.
     SearchNearestNeighborRecursiveLevel(
         point, k, size >> 1, 0, const_cast<std::array<Scalar, N>&>(pmin),
         const_cast<std::array<Scalar, N>&>(pmax), &q);
